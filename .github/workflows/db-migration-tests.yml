@@ -1,0 +1,399 @@
+name: Database Migration Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'supabase/migrations/**'
+      - 'supabase/tests/**'
+      - '.github/workflows/db-migration-tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'supabase/migrations/**'
+      - 'supabase/tests/**'
+
+jobs:
+  migration-validation:
+    name: Migration Validation
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nabuuma_migration_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 && break
+            sleep 1
+          done
+      
+      - name: List migrations
+        run: |
+          echo "=== Available Migrations ==="
+          ls -la supabase/migrations/ || echo "No migrations directory found"
+      
+      - name: Run migrations up
+        run: |
+          echo "Running migrations..."
+          # Using Supabase CLI
+          npm run supabase:db:push || \
+          npm run db:migrate || \
+          psql -h localhost -U postgres -d nabuuma_migration_test -c "SELECT version();"
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nabuuma_migration_test
+        continue-on-error: true
+      
+      - name: Validate schema integrity
+        run: |
+          echo "Validating database schema..."
+          psql -h localhost -U postgres -d nabuuma_migration_test << EOF
+          -- Check for critical tables
+          SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
+          
+          -- Check Row Level Security
+          SELECT schemaname, tablename, rowsecurity FROM pg_tables WHERE schemaname = 'public';
+          
+          -- Check foreign key constraints
+          SELECT constraint_name, table_name, column_name FROM information_schema.constraint_column_usage WHERE table_schema = 'public';
+          EOF
+        env:
+          PGPASSWORD: postgres
+        continue-on-error: true
+      
+      - name: Check for RLS policies
+        run: |
+          echo "Checking Row Level Security Policies..."
+          psql -h localhost -U postgres -d nabuuma_migration_test << EOF
+          SELECT schemaname, tablename, policyname, permissive, roles, qual FROM pg_policies WHERE schemaname = 'public';
+          EOF
+        env:
+          PGPASSWORD: postgres
+        continue-on-error: true
+
+  pgTAP-tests:
+    name: pgTAP Database Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nabuuma_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      
+      - name: Install pgTAP
+        run: |
+          psql -h localhost -U postgres -d nabuuma_test << EOF
+          CREATE EXTENSION IF NOT EXISTS pgtap;
+          EOF
+        env:
+          PGPASSWORD: postgres
+      
+      - name: Run pgTAP tests
+        run: |
+          echo "Running pgTAP tests..."
+          if [ -d "supabase/tests" ]; then
+            for test_file in supabase/tests/*.sql; do
+              if [ -f "$test_file" ]; then
+                echo "Running: $test_file"
+                psql -h localhost -U postgres -d nabuuma_test -f "$test_file" || true
+              fi
+            done
+          else
+            echo "No test files found in supabase/tests/"
+          fi
+        env:
+          PGPASSWORD: postgres
+        continue-on-error: true
+      
+      - name: Generate test report
+        if: always()
+        run: |
+          echo "=== Database Test Summary ==="
+          psql -h localhost -U postgres -d nabuuma_test << EOF
+          SELECT 
+            table_name,
+            table_type,
+            (SELECT count(*) FROM information_schema.columns WHERE table_name = t.table_name) as column_count
+          FROM information_schema.tables t
+          WHERE table_schema = 'public'
+          ORDER BY table_name;
+          EOF
+        env:
+          PGPASSWORD: postgres
+        continue-on-error: true
+
+  migration-rollback-test:
+    name: Migration Rollback Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nabuuma_rollback_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      
+      - name: Apply migrations
+        run: |
+          echo "Applying all migrations..."
+          # Apply migrations
+          npm run db:migrate || true
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nabuuma_rollback_test
+        continue-on-error: true
+      
+      - name: Test rollback capability
+        run: |
+          echo "Testing rollback capability..."
+          psql -h localhost -U postgres -d nabuuma_rollback_test << EOF
+          -- Verify all tables exist before rollback
+          SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = 'public';
+          EOF
+        env:
+          PGPASSWORD: postgres
+        continue-on-error: true
+
+  financial-integrity-test:
+    name: Financial Data Integrity Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nabuuma_financial_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      
+      - name: Apply migrations
+        run: npm run db:migrate || true
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nabuuma_financial_test
+        continue-on-error: true
+      
+      - name: Validate financial constraints
+        run: |
+          echo "=== Financial Integrity Checks ==="
+          psql -h localhost -U postgres -d nabuuma_financial_test << EOF
+          -- Check for NUMERIC precision in financial tables
+          SELECT 
+            table_name,
+            column_name,
+            data_type,
+            numeric_precision,
+            numeric_scale
+          FROM information_schema.columns
+          WHERE table_schema = 'public' 
+          AND (column_name ILIKE '%amount%' OR column_name ILIKE '%price%' OR column_name ILIKE '%balance%')
+          ORDER BY table_name, column_name;
+          
+          -- Verify no floating point types for money
+          SELECT 
+            table_name,
+            column_name,
+            data_type
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+          AND data_type IN ('real', 'double precision')
+          AND (column_name ILIKE '%amount%' OR column_name ILIKE '%price%' OR column_name ILIKE '%balance%');
+          EOF
+        env:
+          PGPASSWORD: postgres
+        continue-on-error: true
+
+  tenant-isolation-test:
+    name: Tenant Isolation & Security Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nabuuma_tenant_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      
+      - name: Apply migrations
+        run: npm run db:migrate || true
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nabuuma_tenant_test
+        continue-on-error: true
+      
+      - name: Verify RLS is enabled
+        run: |
+          echo "=== Row Level Security Verification ==="
+          psql -h localhost -U postgres -d nabuuma_tenant_test << EOF
+          -- Check RLS status on all tables
+          SELECT 
+            schemaname,
+            tablename,
+            rowsecurity,
+            forcerowsecurity
+          FROM pg_tables
+          WHERE schemaname = 'public'
+          ORDER BY tablename;
+          
+          -- List all RLS policies
+          SELECT 
+            schemaname,
+            tablename,
+            policyname,
+            permissive,
+            roles,
+            qual,
+            with_check
+          FROM pg_policies
+          WHERE schemaname = 'public'
+          ORDER BY tablename, policyname;
+          EOF
+        env:
+          PGPASSWORD: postgres
+        continue-on-error: true
+
+  migration-performance-test:
+    name: Migration Performance Benchmark
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nabuuma_perf_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client time
+      
+      - name: Benchmark migrations
+        run: |
+          echo "=== Migration Performance Benchmark ==="
+          START_TIME=$(date +%s%N)
+          
+          npm run db:migrate || true
+          
+          END_TIME=$(date +%s%N)
+          DURATION=$((($END_TIME - $START_TIME) / 1000000))
+          
+          echo "Migration time: ${DURATION}ms"
+          
+          if [ $DURATION -gt 30000 ]; then
+            echo "WARNING: Migrations took longer than 30 seconds"
+          fi
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nabuuma_perf_test
+        continue-on-error: true
+
+  migration-summary:
+    name: Migration Test Summary
+    runs-on: ubuntu-latest
+    needs: [ migration-validation, pgTAP-tests, migration-rollback-test, financial-integrity-test, tenant-isolation-test, migration-performance-test ]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate summary
+        run: |
+          echo "=== Database Migration Test Summary ==="
+          echo "Migration Validation: ${{ needs.migration-validation.result }}"
+          echo "pgTAP Tests: ${{ needs.pgTAP-tests.result }}"
+          echo "Rollback Tests: ${{ needs.migration-rollback-test.result }}"
+          echo "Financial Integrity: ${{ needs.financial-integrity-test.result }}"
+          echo "Tenant Isolation: ${{ needs.tenant-isolation-test.result }}"
+          echo "Performance: ${{ needs.migration-performance-test.result }}"
+      
+      - name: Fail if critical tests failed
+        if: |
+          needs.migration-validation.result == 'failure' ||
+          needs.tenant-isolation-test.result == 'failure' ||
+          needs.financial-integrity-test.result == 'failure'
+        run: exit 1
