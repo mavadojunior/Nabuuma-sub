@@ -1,0 +1,47 @@
+* @Mavadocasamigos
+
+# Application / UI
+/app/ @Mavadocasamigos
+/components/ @Mavadocasamigos
+/public/ @Mavadocasamigos
+
+# Core business logic
+/lib/ @Mavadocasamigos
+
+# Database, migrations, RLS and tests
+/supabase/ @Mavadocasamigos
+
+# Authentication and request/session boundary
+/middleware.ts @Mavadocasamigos
+/auth/ @Mavadocasamigos
+
+# API routes and external system boundaries
+/app/api/ @Mavadocasamigos
+
+# Financial, settlement and fiscalization controls
+/lib/financial/ @Mavadocasamigos
+/lib/settlement/ @Mavadocasamigos
+/lib/regional-fiscalization/ @Mavadocasamigos
+/lib/oracle-evidence/ @Mavadocasamigos
+/lib/ledger-continuity/ @Mavadocasamigos
+
+# Configuration and dependency control
+/package.json @Mavadocasamigos
+/package-lock.json @Mavadocasamigos
+/tsconfig.json @Mavadocasamigos
+/next.config.* @Mavadocasamigos
+/.env.example @Mavadocasamigos
+
+# CI/CD and repository security
+/.github/ @Mavadocasamigos
+/.github/workflows/ @Mavadocasamigos
+/.github/CODEOWNERS @Mavadocasamigos
+
+# Database security-critical files
+/supabase/migrations/ @Mavadocasamigos
+/supabase/tests/ @Mavadocasamigos
+
+# Documentation and architectural specifications
+/*.md @Mavadocasamigos
+/docs/ @Mavadocasamigos
+/architecture/ @Mavadocasamigos
